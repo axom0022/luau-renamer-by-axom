@@ -26,7 +26,7 @@ python luaurenamer.py inputfilename outputfilename
 
 # Credits / Socials 
 
-[Our Discord Server](https://discord.gg/Sps39CydcZ) : https://discord.gg/Sps39CydcZ 
-[Our Youtube Channel](https://youtube.com/@axos0022) : https://youtube.com/@axos0022
+# [Our Discord Server](https://discord.gg/Sps39CydcZ) : https://discord.gg/Sps39CydcZ 
+# [Our Youtube Channel](https://youtube.com/@axos0022) : https://youtube.com/@axos0022
 
 Creator : Axom
