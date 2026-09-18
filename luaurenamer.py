@@ -45,6 +45,18 @@ def isvalididentifier(s):
     return bool(re.fullmatch(r"[A-Za-z_]\w*", s))
 
 
+def tocamel(name):
+    if not name:
+        return name
+    return name[0].lower() + name[1:]
+
+
+def joinsuffix(base, num):
+    if base and base[-1].isdigit():
+        return base + "_" + str(num)
+    return base + str(num)
+
+
 def striptrailingindex(e):
     m = re.match(r'^(.*?)\s*\[[^\]]*\]\s*$', e)
     if m:
@@ -55,17 +67,153 @@ def striptrailingindex(e):
 
 
 def startswithname(text, name):
-    text = re.sub(r"--.*$", "", text)
+    text = re.sub(r"--[^\n]*", "", text)
     stripped = re.sub(r'"(?:\\.|[^"\\])*"', '""', text)
     stripped = re.sub(r"'(?:\\.|[^'\\])*'", "''", stripped)
     m = re.match(r'^\s*([A-Za-z_]\w*)', stripped)
     return bool(m and m.group(1) == name)
 
 
+def readstmt(code, start):
+    i = start
+    n = len(code)
+    depth = 0
+    while i < n:
+        c = code[i]
+        if c == '"' or c == "'":
+            q = c
+            i += 1
+            while i < n and code[i] != q:
+                if code[i] == "\\" and i + 1 < n:
+                    i += 2
+                else:
+                    i += 1
+            if i < n:
+                i += 1
+            continue
+        if c == "-" and i + 1 < n and code[i + 1] == "-":
+            j = code.find("\n", i)
+            if j == -1:
+                i = n
+            else:
+                i = j
+            if depth == 0:
+                return code[start:i], i
+            continue
+        if c == "[" and i + 1 < n and (code[i + 1] == "[" or code[i + 1] == "="):
+            j = i + 1
+            eq = 0
+            while j < n and code[j] == "=":
+                eq += 1
+                j += 1
+            if j < n and code[j] == "[":
+                close = "]" + "=" * eq + "]"
+                end = code.find(close, j + 1)
+                i = n if end == -1 else end + len(close)
+                continue
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            if depth > 0:
+                depth -= 1
+        elif c == "\n" and depth == 0:
+            return code[start:i], i
+        i += 1
+    return code[start:n], n
+
+
+def splitcommas(text):
+    parts = []
+    depth = 0
+    last = 0
+    i = 0
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if c == '"' or c == "'":
+            q = c
+            i += 1
+            while i < n and text[i] != q:
+                if text[i] == "\\" and i + 1 < n:
+                    i += 2
+                else:
+                    i += 1
+            if i < n:
+                i += 1
+            continue
+        if c == "-" and i + 1 < n and text[i + 1] == "-":
+            j = text.find("\n", i)
+            i = n if j == -1 else j
+            continue
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            if depth > 0:
+                depth -= 1
+        elif c == "," and depth == 0:
+            parts.append(text[last:i])
+            last = i + 1
+        i += 1
+    parts.append(text[last:])
+    return parts
+
+
+def applymap(text, namemap):
+    if not namemap:
+        return text
+    result = []
+    i = 0
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if c == '"' or c == "'":
+            start = i
+            q = c
+            i += 1
+            while i < n and text[i] != q:
+                if text[i] == "\\" and i + 1 < n:
+                    i += 2
+                else:
+                    i += 1
+            if i < n:
+                i += 1
+            result.append(text[start:i])
+            continue
+        if c == "-" and i + 1 < n and text[i + 1] == "-":
+            j = text.find("\n", i)
+            if j == -1:
+                j = n
+            result.append(text[i:j])
+            i = j
+            continue
+        if c.isalpha() or c == "_":
+            m = re.match(r"[A-Za-z_]\w*", text[i:])
+            word = m.group(0)
+            k = i - 1
+            while k >= 0 and text[k] in " \t\n\r":
+                k -= 1
+            isfield = k >= 0 and text[k] in ".:"
+            if not isfield and word in namemap:
+                result.append(namemap[word])
+            else:
+                result.append(word)
+            i += len(word)
+            continue
+        result.append(c)
+        i += 1
+    return "".join(result)
+
+
 def infername(expr):
-    e = re.sub(r"--.*$", "", expr).strip()
+    e = re.sub(r"--[^\n]*", "", expr).strip()
     if not e:
         return None
+
+    m = re.match(r'^["\']([A-Za-z_][A-Za-z0-9_]*)["\']\s*$', e)
+    if m:
+        n = normalizeclassname(m.group(1))
+        return n if isvalididentifier(n) and n not in keywords else None
+
     e = striptrailingindex(e)
 
     m = re.match(r'^game\s*:\s*GetService\s*\(\s*["\']([^"\']+)["\']\s*\)\s*$', e)
@@ -134,14 +282,22 @@ def infername(expr):
         n = methodnames.get(method, normalizeclassname(method))
         return n if isvalididentifier(n) and n not in keywords else None
 
-    m = re.search(r"\.\s*([A-Z][A-Za-z0-9_]*)\s*$", e)
+    m = re.search(r"\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*$", e)
     if m:
-        n = m.group(1)
+        field = m.group(1)
+        if field[0].islower():
+            n = field[0].upper() + field[1:]
+        else:
+            n = field
         return n if isvalididentifier(n) and n not in keywords else None
 
-    m = re.search(r'\[\s*["\']([A-Z][A-Za-z0-9_]*)["\']\s*\]\s*$', e)
+    m = re.search(r'\[\s*["\']([A-Za-z_][A-Za-z0-9_]*)["\']\s*\]\s*$', e)
     if m:
-        n = normalizeclassname(m.group(1))
+        field = m.group(1)
+        if field[0].islower():
+            n = field[0].upper() + field[1:]
+        else:
+            n = field
         return n if isvalididentifier(n) and n not in keywords else None
 
     m = re.match(r'^([a-zA-Z_]\w*)\s*$', e)
@@ -250,6 +406,36 @@ def findscopes(tokens):
     return scopes
 
 
+def collectassigns(tokens, code, n):
+    assigns = {}
+    ti = 0
+    while ti < n - 1:
+        tok = tokens[ti]
+        if tok[0] != "ident":
+            ti += 1
+            continue
+        op1 = tokens[ti + 1]
+        if op1[0] != "op" or op1[1] != "=":
+            ti += 1
+            continue
+        if ti + 2 < n and tokens[ti + 2][0] == "op" and tokens[ti + 2][1] == "=":
+            ti += 2
+            continue
+        if ti > 0:
+            prev = tokens[ti - 1]
+            if prev[0] == "kw" and prev[1] == "for":
+                ti += 1
+                continue
+            if prev[0] == "op" and prev[1] in ".:":
+                ti += 1
+                continue
+        rhsstart = op1[3]
+        rhstext, _ = readstmt(code, rhsstart)
+        assigns.setdefault(tok[1], []).append((ti, rhstext))
+        ti += 1
+    return assigns
+
+
 def renamecode(code):
     tokens = tokenize(code)
     n = len(tokens)
@@ -269,45 +455,112 @@ def renamecode(code):
             pos -= 1
         return n
 
-    usednames = set()
-    for ti in range(n - 1):
-        if tokens[ti][0] == "kw" and tokens[ti][1] == "local":
-            if tokens[ti + 1][0] == "ident":
-                usednames.add(tokens[ti + 1][1])
+    def scopechainof(ti):
+        chain = [sid for sid, (s, e) in enumerate(scopes) if s <= ti < e]
+        chain.sort(key=lambda sid: scopes[sid][0])
+        return chain
+
+    assigns = collectassigns(tokens, code, n)
+    scopeused = {}
 
     renames = []
     ti = 0
-    while ti < n - 1:
+    while ti < n:
         tok = tokens[ti]
         if tok[0] == "kw" and tok[1] == "local":
-            nametok = tokens[ti + 1]
-            if nametok[0] == "ident" and ti + 2 < n:
-                eqtok = tokens[ti + 2]
-                if eqtok[0] == "op" and eqtok[1] == "=":
-                    oldname = nametok[1]
-                    if not oldname.startswith("_"):
-                        exprstart = eqtok[3]
-                        lineend = code.find("\n", exprstart)
-                        if lineend == -1:
-                            lineend = len(code)
-                        exprtext = code[exprstart:lineend]
-                        newname = infername(exprtext)
-                        if newname:
-                            shadow = startswithname(exprtext, newname)
-                            if not (newname == oldname and not shadow):
-                                scopeendti = scopeendfor(ti)
-                                if shadow:
-                                    candidate = newname + "_2"
-                                    suffix = 3
-                                else:
-                                    candidate = newname
-                                    suffix = 2
-                                while candidate in usednames or candidate == oldname:
-                                    candidate = newname + "_" + str(suffix)
-                                    suffix += 1
-                                if candidate != oldname:
-                                    usednames.add(candidate)
-                                    renames.append((oldname, candidate, ti, scopeendti))
+            names = []
+            j = ti + 1
+            while j < n:
+                t = tokens[j]
+                if t[0] == "ident":
+                    names.append((j, t[1]))
+                    j += 1
+                    if j < n and tokens[j][0] == "op" and tokens[j][1] == ",":
+                        j += 1
+                        continue
+                    else:
+                        break
+                else:
+                    break
+
+            if not names:
+                ti += 1
+                continue
+
+            haseq = j < n and tokens[j][0] == "op" and tokens[j][1] == "="
+
+            if haseq:
+                rhsstart = tokens[j][3]
+                rhstext, _ = readstmt(code, rhsstart)
+                rhsparts = splitcommas(rhstext)
+            else:
+                rhsparts = []
+
+            for idx, (nameti, oldname) in enumerate(names):
+                if oldname.startswith("_"):
+                    continue
+
+                rawname = None
+                swappedrhs = None
+
+                if haseq and idx < len(rhsparts):
+                    visible = {}
+                    for (on, nn, dt, et) in renames:
+                        if dt <= nameti < et:
+                            visible[on] = nn
+                    swappedrhs = applymap(rhsparts[idx], visible)
+                    rawname = infername(swappedrhs)
+
+                if not rawname:
+                    scopeendti = scopeendfor(nameti)
+                    for (ati, atext) in assigns.get(oldname, []):
+                        if ati > nameti and ati < scopeendti:
+                            visible = {}
+                            for (on, nn, dt, et) in renames:
+                                if dt <= ati < et:
+                                    visible[on] = nn
+                            swapped = applymap(atext, visible)
+                            cand = infername(swapped)
+                            if cand:
+                                rawname = cand
+                                swappedrhs = swapped
+                                break
+
+                if not rawname:
+                    continue
+
+                newname = tocamel(rawname)
+                shadow = startswithname(swappedrhs, rawname)
+
+                if newname == oldname and not shadow:
+                    continue
+
+                chain = scopechainof(nameti)
+                seenchain = set(scopeused.get(-1, set()))
+                for sid in chain:
+                    seenchain |= scopeused.get(sid, set())
+
+                if shadow:
+                    candidate = joinsuffix(newname, 2)
+                    suffix = 3
+                else:
+                    candidate = newname
+                    suffix = 2
+                while candidate in seenchain or candidate == oldname:
+                    candidate = joinsuffix(newname, suffix)
+                    suffix += 1
+                if candidate == oldname:
+                    continue
+
+                if chain:
+                    innermost = chain[-1]
+                else:
+                    innermost = -1
+                scopeused.setdefault(innermost, set()).add(candidate)
+
+                scopeendti = scopeendfor(nameti)
+                renames.append((oldname, candidate, nameti, scopeendti))
+
         ti += 1
 
     if not renames:
@@ -349,7 +602,7 @@ def renamecode(code):
     return "".join(out)
 
 
-def portavailable(host, port):
+def portfree(host, port):
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -359,13 +612,13 @@ def portavailable(host, port):
         return False
 
 
-def findfreeport(host, low=20000, high=65000, tries=200):
+def anyport(host, low=20000, high=65000, tries=200):
     for _ in range(tries):
         port = random.randint(low, high)
-        if portavailable(host, port):
+        if portfree(host, port):
             return port
     for port in range(low, high):
-        if portavailable(host, port):
+        if portfree(host, port):
             return port
     return None
 
@@ -912,191 +1165,76 @@ html = r"""<!DOCTYPE html>
 const $ = (id) => document.getElementById(id);
 const canvas = $("fx");
 const ctx = canvas.getContext("2d");
-let W = 0, H = 0;
+let w = 0, h = 0;
 let particles = [];
-let currentEffect = "none";
-let rafId = null;
+let currenteffect = "none";
+let rafid = null;
 
 function resize() {
   const dpr = window.devicePixelRatio || 1;
-  W = window.innerWidth;
-  H = window.innerHeight;
-  canvas.width = W * dpr;
-  canvas.height = H * dpr;
-  canvas.style.width = W + "px";
-  canvas.style.height = H + "px";
+  w = window.innerWidth;
+  h = window.innerHeight;
+  canvas.width = w * dpr;
+  canvas.height = h * dpr;
+  canvas.style.width = w + "px";
+  canvas.style.height = h + "px";
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  if (currentEffect !== "none") {
+  if (currenteffect !== "none") {
     particles = [];
-    effects[currentEffect].init();
+    effects[currenteffect].init();
   }
 }
 
 const effects = {
   none: { init() {}, step() {}, draw() {} },
   particles: {
-    init() {
-      const count = 80;
-      for (let i = 0; i < count; i++) {
-        particles.push({ x: Math.random() * W, y: Math.random() * H, vx: (Math.random() - 0.5) * 0.4, vy: (Math.random() - 0.5) * 0.4, r: Math.random() * 2 + 0.5, a: Math.random() * 0.5 + 0.25 });
-      }
-    },
-    step() {
-      for (const p of particles) {
-        p.x += p.vx; p.y += p.vy;
-        if (p.x < -5) p.x = W + 5; else if (p.x > W + 5) p.x = -5;
-        if (p.y < -5) p.y = H + 5; else if (p.y > H + 5) p.y = -5;
-      }
-    },
-    draw() {
-      for (const p of particles) {
-        ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
-        ctx.fillStyle = "rgba(255,255,255," + p.a + ")"; ctx.fill();
-      }
-    }
+    init() { for (let i = 0; i < 80; i++) particles.push({ x: Math.random() * w, y: Math.random() * h, vx: (Math.random() - 0.5) * 0.4, vy: (Math.random() - 0.5) * 0.4, r: Math.random() * 2 + 0.5, a: Math.random() * 0.5 + 0.25 }); },
+    step() { for (const p of particles) { p.x += p.vx; p.y += p.vy; if (p.x < -5) p.x = w + 5; else if (p.x > w + 5) p.x = -5; if (p.y < -5) p.y = h + 5; else if (p.y > h + 5) p.y = -5; } },
+    draw() { for (const p of particles) { ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fillStyle = "rgba(255,255,255," + p.a + ")"; ctx.fill(); } }
   },
   rain: {
-    init() {
-      const count = 180;
-      for (let i = 0; i < count; i++) {
-        particles.push({ x: Math.random() * W, y: Math.random() * H, len: Math.random() * 22 + 10, speed: Math.random() * 8 + 5, a: Math.random() * 0.35 + 0.15 });
-      }
-    },
-    step() {
-      for (const p of particles) {
-        p.y += p.speed;
-        if (p.y > H + p.len) { p.y = -p.len; p.x = Math.random() * W; }
-      }
-    },
-    draw() {
-      ctx.lineWidth = 1;
-      for (const p of particles) {
-        ctx.strokeStyle = "rgba(200,220,255," + p.a + ")";
-        ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(p.x, p.y + p.len); ctx.stroke();
-      }
-    }
+    init() { for (let i = 0; i < 180; i++) particles.push({ x: Math.random() * w, y: Math.random() * h, len: Math.random() * 22 + 10, speed: Math.random() * 8 + 5, a: Math.random() * 0.35 + 0.15 }); },
+    step() { for (const p of particles) { p.y += p.speed; if (p.y > h + p.len) { p.y = -p.len; p.x = Math.random() * w; } } },
+    draw() { ctx.lineWidth = 1; for (const p of particles) { ctx.strokeStyle = "rgba(200,220,255," + p.a + ")"; ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(p.x, p.y + p.len); ctx.stroke(); } }
   },
   snow: {
-    init() {
-      const count = 150;
-      for (let i = 0; i < count; i++) {
-        particles.push({ x: Math.random() * W, y: Math.random() * H, r: Math.random() * 2.2 + 0.8, speed: Math.random() * 0.8 + 0.3, wobble: Math.random() * Math.PI * 2, wobbleSpeed: Math.random() * 0.02 + 0.01, a: Math.random() * 0.6 + 0.35 });
-      }
-    },
-    step() {
-      for (const p of particles) {
-        p.wobble += p.wobbleSpeed; p.y += p.speed; p.x += Math.sin(p.wobble) * 0.6;
-        if (p.y > H + 5) { p.y = -5; p.x = Math.random() * W; }
-      }
-    },
-    draw() {
-      for (const p of particles) {
-        ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
-        ctx.fillStyle = "rgba(255,255,255," + p.a + ")"; ctx.fill();
-      }
-    }
+    init() { for (let i = 0; i < 150; i++) particles.push({ x: Math.random() * w, y: Math.random() * h, r: Math.random() * 2.2 + 0.8, speed: Math.random() * 0.8 + 0.3, wobble: Math.random() * Math.PI * 2, wobblespeed: Math.random() * 0.02 + 0.01, a: Math.random() * 0.6 + 0.35 }); },
+    step() { for (const p of particles) { p.wobble += p.wobblespeed; p.y += p.speed; p.x += Math.sin(p.wobble) * 0.6; if (p.y > h + 5) { p.y = -5; p.x = Math.random() * w; } } },
+    draw() { for (const p of particles) { ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fillStyle = "rgba(255,255,255," + p.a + ")"; ctx.fill(); } }
   },
   stars: {
-    init() {
-      const count = 220;
-      for (let i = 0; i < count; i++) {
-        particles.push({ x: Math.random() * W, y: Math.random() * H, r: Math.random() * 1.6 + 0.4, phase: Math.random() * Math.PI * 2, speed: Math.random() * 0.04 + 0.01 });
-      }
-    },
+    init() { for (let i = 0; i < 220; i++) particles.push({ x: Math.random() * w, y: Math.random() * h, r: Math.random() * 1.6 + 0.4, phase: Math.random() * Math.PI * 2, speed: Math.random() * 0.04 + 0.01 }); },
     step() { for (const p of particles) p.phase += p.speed; },
-    draw() {
-      for (const p of particles) {
-        const a = (Math.sin(p.phase) + 1) / 2 * 0.85 + 0.15;
-        ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
-        ctx.fillStyle = "rgba(255,255,255," + a + ")"; ctx.fill();
-      }
-    }
+    draw() { for (const p of particles) { const a = (Math.sin(p.phase) + 1) / 2 * 0.85 + 0.15; ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fillStyle = "rgba(255,255,255," + a + ")"; ctx.fill(); } }
   },
   aurora: {
     init() {}, step() {},
     draw() {
       const t = performance.now() * 0.0004;
-      const colors = [
-        ["rgba(120,255,190,0.20)", "rgba(120,255,190,0)"],
-        ["rgba(180,120,255,0.16)", "rgba(180,120,255,0)"],
-        ["rgba(120,180,255,0.16)", "rgba(120,180,255,0)"]
-      ];
+      const colors = [["rgba(120,255,190,0.20)","rgba(120,255,190,0)"],["rgba(180,120,255,0.16)","rgba(180,120,255,0)"],["rgba(120,180,255,0.16)","rgba(120,180,255,0)"]];
       for (let i = 0; i < 3; i++) {
-        const grad = ctx.createLinearGradient(0, 0, W, 0);
+        const grad = ctx.createLinearGradient(0, 0, w, 0);
         grad.addColorStop(0, colors[i][1]); grad.addColorStop(0.5, colors[i][0]); grad.addColorStop(1, colors[i][1]);
-        const baseY = H * 0.35 + i * 90;
-        ctx.beginPath(); ctx.moveTo(0, H);
-        for (let x = 0; x <= W; x += 12) {
-          const y = baseY + Math.sin(x * 0.004 + t + i * 1.5) * 70 + Math.sin(x * 0.009 + t * 1.7) * 30;
-          ctx.lineTo(x, y);
-        }
-        ctx.lineTo(W, H); ctx.closePath(); ctx.fillStyle = grad; ctx.fill();
+        const basey = h * 0.35 + i * 90;
+        ctx.beginPath(); ctx.moveTo(0, h);
+        for (let x = 0; x <= w; x += 12) { const y = basey + Math.sin(x * 0.004 + t + i * 1.5) * 70 + Math.sin(x * 0.009 + t * 1.7) * 30; ctx.lineTo(x, y); }
+        ctx.lineTo(w, h); ctx.closePath(); ctx.fillStyle = grad; ctx.fill();
       }
     }
   },
   bubbles: {
-    init() {
-      const count = 60;
-      for (let i = 0; i < count; i++) {
-        particles.push({ x: Math.random() * W, y: Math.random() * H + H, r: Math.random() * 18 + 5, speed: Math.random() * 0.9 + 0.4, wobble: Math.random() * Math.PI * 2, wobbleSpeed: Math.random() * 0.02 + 0.01, a: Math.random() * 0.3 + 0.25 });
-      }
-    },
-    step() {
-      for (const p of particles) {
-        p.wobble += p.wobbleSpeed; p.y -= p.speed; p.x += Math.sin(p.wobble) * 0.5;
-        if (p.y < -p.r * 2) { p.y = H + p.r * 2; p.x = Math.random() * W; }
-      }
-    },
-    draw() {
-      for (const p of particles) {
-        ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
-        ctx.strokeStyle = "rgba(255,255,255," + p.a + ")"; ctx.lineWidth = 1.4; ctx.stroke();
-        ctx.beginPath(); ctx.arc(p.x - p.r * 0.3, p.y - p.r * 0.3, p.r * 0.22, 0, Math.PI * 2);
-        ctx.fillStyle = "rgba(255,255,255," + (p.a + 0.2) + ")"; ctx.fill();
-      }
-    }
+    init() { for (let i = 0; i < 60; i++) particles.push({ x: Math.random() * w, y: Math.random() * h + h, r: Math.random() * 18 + 5, speed: Math.random() * 0.9 + 0.4, wobble: Math.random() * Math.PI * 2, wobblespeed: Math.random() * 0.02 + 0.01, a: Math.random() * 0.3 + 0.25 }); },
+    step() { for (const p of particles) { p.wobble += p.wobblespeed; p.y -= p.speed; p.x += Math.sin(p.wobble) * 0.5; if (p.y < -p.r * 2) { p.y = h + p.r * 2; p.x = Math.random() * w; } } },
+    draw() { for (const p of particles) { ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.strokeStyle = "rgba(255,255,255," + p.a + ")"; ctx.lineWidth = 1.4; ctx.stroke(); ctx.beginPath(); ctx.arc(p.x - p.r * 0.3, p.y - p.r * 0.3, p.r * 0.22, 0, Math.PI * 2); ctx.fillStyle = "rgba(255,255,255," + (p.a + 0.2) + ")"; ctx.fill(); } }
   },
   fireflies: {
-    init() {
-      const count = 45;
-      for (let i = 0; i < count; i++) {
-        particles.push({ x: Math.random() * W, y: Math.random() * H, vx: (Math.random() - 0.5) * 0.5, vy: (Math.random() - 0.5) * 0.5, phase: Math.random() * Math.PI * 2, speed: Math.random() * 0.06 + 0.02 });
-      }
-    },
-    step() {
-      for (const p of particles) {
-        p.phase += p.speed; p.x += p.vx; p.y += p.vy;
-        if (Math.random() < 0.015) { p.vx = (Math.random() - 0.5) * 0.6; p.vy = (Math.random() - 0.5) * 0.6; }
-        if (p.x < 0 || p.x > W) p.vx *= -1;
-        if (p.y < 0 || p.y > H) p.vy *= -1;
-      }
-    },
-    draw() {
-      for (const p of particles) {
-        const glow = (Math.sin(p.phase) + 1) / 2;
-        const a = glow * 0.75 + 0.25;
-        const r = 2.5 + glow * 2.5;
-        const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r * 6);
-        grad.addColorStop(0, "rgba(255,245,160," + a + ")");
-        grad.addColorStop(0.35, "rgba(255,220,100," + (a * 0.35) + ")");
-        grad.addColorStop(1, "rgba(255,220,100,0)");
-        ctx.beginPath(); ctx.arc(p.x, p.y, r * 6, 0, Math.PI * 2); ctx.fillStyle = grad; ctx.fill();
-        ctx.beginPath(); ctx.arc(p.x, p.y, r * 0.5, 0, Math.PI * 2); ctx.fillStyle = "rgba(255,255,230," + a + ")"; ctx.fill();
-      }
-    }
+    init() { for (let i = 0; i < 45; i++) particles.push({ x: Math.random() * w, y: Math.random() * h, vx: (Math.random() - 0.5) * 0.5, vy: (Math.random() - 0.5) * 0.5, phase: Math.random() * Math.PI * 2, speed: Math.random() * 0.06 + 0.02 }); },
+    step() { for (const p of particles) { p.phase += p.speed; p.x += p.vx; p.y += p.vy; if (Math.random() < 0.015) { p.vx = (Math.random() - 0.5) * 0.6; p.vy = (Math.random() - 0.5) * 0.6; } if (p.x < 0 || p.x > w) p.vx *= -1; if (p.y < 0 || p.y > h) p.vy *= -1; } },
+    draw() { for (const p of particles) { const glow = (Math.sin(p.phase) + 1) / 2; const a = glow * 0.75 + 0.25; const r = 2.5 + glow * 2.5; const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r * 6); grad.addColorStop(0, "rgba(255,245,160," + a + ")"); grad.addColorStop(0.35, "rgba(255,220,100," + (a * 0.35) + ")"); grad.addColorStop(1, "rgba(255,220,100,0)"); ctx.beginPath(); ctx.arc(p.x, p.y, r * 6, 0, Math.PI * 2); ctx.fillStyle = grad; ctx.fill(); ctx.beginPath(); ctx.arc(p.x, p.y, r * 0.5, 0, Math.PI * 2); ctx.fillStyle = "rgba(255,255,230," + a + ")"; ctx.fill(); } }
   },
   matrix: {
-    init() {
-      const fontSize = 14;
-      const cols = Math.floor(W / fontSize) + 1;
-      for (let i = 0; i < cols; i++) particles.push({ x: i * fontSize, y: Math.random() * H, speed: Math.random() * 3 + 2 });
-    },
-    step() {
-      for (const p of particles) {
-        p.y += p.speed;
-        if (p.y > H + 30) { p.y = -20; p.speed = Math.random() * 3 + 2; }
-      }
-    },
+    init() { const fontsize = 14; const cols = Math.floor(w / fontsize) + 1; for (let i = 0; i < cols; i++) particles.push({ x: i * fontsize, y: Math.random() * h, speed: Math.random() * 3 + 2 }); },
+    step() { for (const p of particles) { p.y += p.speed; if (p.y > h + 30) { p.y = -20; p.speed = Math.random() * 3 + 2; } } },
     draw() {
       const chars = "アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲン0123456789";
       ctx.font = "14px monospace";
@@ -1109,37 +1247,16 @@ const effects = {
     }
   },
   confetti: {
-    init() {
-      const count = 120;
-      const colors = ["#f87171","#fbbf24","#34d399","#60a5fa","#a78bfa","#f472b6","#fb923c","#4ade80"];
-      for (let i = 0; i < count; i++) {
-        particles.push({ x: Math.random() * W, y: Math.random() * -H, w: Math.random() * 6 + 4, h: Math.random() * 4 + 3, vy: Math.random() * 2 + 1.2, vx: (Math.random() - 0.5) * 1.5, rot: Math.random() * Math.PI * 2, rotSpeed: (Math.random() - 0.5) * 0.15, color: colors[Math.floor(Math.random() * colors.length)] });
-      }
-    },
-    step() {
-      for (const p of particles) {
-        p.y += p.vy; p.x += p.vx; p.rot += p.rotSpeed;
-        if (p.y > H + 20) { p.y = -20; p.x = Math.random() * W; }
-        if (p.x < -20) p.x = W + 20;
-        if (p.x > W + 20) p.x = -20;
-      }
-    },
-    draw() {
-      for (const p of particles) {
-        ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.rot);
-        ctx.fillStyle = p.color; ctx.globalAlpha = 0.85;
-        ctx.fillRect(-p.w / 2, -p.h / 2, p.w, p.h);
-        ctx.restore();
-      }
-      ctx.globalAlpha = 1;
-    }
+    init() { const colors = ["#f87171","#fbbf24","#34d399","#60a5fa","#a78bfa","#f472b6","#fb923c","#4ade80"]; for (let i = 0; i < 120; i++) particles.push({ x: Math.random() * w, y: Math.random() * -h, w: Math.random() * 6 + 4, h: Math.random() * 4 + 3, vy: Math.random() * 2 + 1.2, vx: (Math.random() - 0.5) * 1.5, rot: Math.random() * Math.PI * 2, rotspeed: (Math.random() - 0.5) * 0.15, color: colors[Math.floor(Math.random() * colors.length)] }); },
+    step() { for (const p of particles) { p.y += p.vy; p.x += p.vx; p.rot += p.rotspeed; if (p.y > h + 20) { p.y = -20; p.x = Math.random() * w; } if (p.x < -20) p.x = w + 20; if (p.x > w + 20) p.x = -20; } },
+    draw() { for (const p of particles) { ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.rot); ctx.fillStyle = p.color; ctx.globalAlpha = 0.85; ctx.fillRect(-p.w / 2, -p.h / 2, p.w, p.h); ctx.restore(); } ctx.globalAlpha = 1; }
   },
   plasma: {
     init() {}, step() {},
     draw() {
       const t = performance.now() * 0.0005;
-      for (let y = 0; y < H; y += 12) {
-        for (let x = 0; x < W; x += 12) {
+      for (let y = 0; y < h; y += 12) {
+        for (let x = 0; x < w; x += 12) {
           const v = Math.sin(x * 0.008 + t) + Math.sin(y * 0.008 + t * 1.3) + Math.sin((x + y) * 0.006 + t * 0.8) + Math.sin(Math.sqrt(x * x + y * y) * 0.01 + t * 1.5);
           const a = (v + 4) / 8 * 0.12;
           const hue = (v * 60 + t * 40) % 360;
@@ -1152,17 +1269,17 @@ const effects = {
 };
 
 function loop() {
-  ctx.clearRect(0, 0, W, H);
-  const fx = effects[currentEffect];
+  ctx.clearRect(0, 0, w, h);
+  const fx = effects[currenteffect];
   fx.step();
   fx.draw();
-  rafId = requestAnimationFrame(loop);
+  rafid = requestAnimationFrame(loop);
 }
 
-function setEffect(name) {
-  if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
-  ctx.clearRect(0, 0, W, H);
-  currentEffect = name;
+function seteffect(name) {
+  if (rafid) { cancelAnimationFrame(rafid); rafid = null; }
+  ctx.clearRect(0, 0, w, h);
+  currenteffect = name;
   particles = [];
   if (name === "none" || !effects[name]) return;
   effects[name].init();
@@ -1174,11 +1291,11 @@ function setstatus(msg, cls) { const s = $("status"); s.textContent = msg; s.cla
 resize();
 window.addEventListener("resize", resize);
 
-const storedFx = localStorage.getItem("luaurenamer-fx") || "none";
-$("fxpick").value = effects[storedFx] ? storedFx : "none";
-setEffect($("fxpick").value);
+const storedfx = localStorage.getItem("luaurenamer-fx") || "none";
+$("fxpick").value = effects[storedfx] ? storedfx : "none";
+seteffect($("fxpick").value);
 $("fxpick").onchange = (e) => {
-  setEffect(e.target.value);
+  seteffect(e.target.value);
   localStorage.setItem("luaurenamer-fx", e.target.value);
 };
 
@@ -1276,14 +1393,14 @@ class handler(BaseHTTPRequestHandler):
 
 def runweb(host, port, openbrowser):
     if port is None or port <= 0:
-        port = findfreeport(host)
+        port = anyport(host)
         if port is None:
             print("No free port found.", file=sys.stderr)
             return 1
     else:
-        if not portavailable(host, port):
+        if not portfree(host, port):
             print(f"Port {port} is in use, picking a free one...", file=sys.stderr)
-            port = findfreeport(host)
+            port = anyport(host)
             if port is None:
                 print("No free port found.", file=sys.stderr)
                 return 1
@@ -1338,7 +1455,7 @@ def runterminal(inpath, outpath):
 def main():
     p = argparse.ArgumentParser(
         prog="luaurenamer",
-        description="Renames Luau variables to inferred PascalCase names.",
+        description="Renames Luau variables to inferred camelCase names.",
     )
     p.add_argument("input", nargs="?", default=None,
                    help="Input file (omit to read from stdin)")
