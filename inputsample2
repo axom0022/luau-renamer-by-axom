@@ -1,0 +1,4 @@
+local v1 = game:GetService("Workspace")
+local v2 = workspace:FindFirstChild("Hello")
+local v3 = loadstring(game:HttpGet("https://github.com/rayfield/rayfield"))()
+v3:CreateWindow("World")
